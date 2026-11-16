@@ -7,6 +7,7 @@ import { HttpError, errorBody, originOf, sendJson, type RequestContext } from '.
 import { Store } from './store.ts';
 import { handleRest } from './rest/index.ts';
 import { handleGit } from './git/smart-http.ts';
+import { handleGraphQL } from './graphql/index.ts';
 
 let requestCounter = 0;
 
@@ -25,6 +26,7 @@ async function handle(ctx: RequestContext): Promise<void> {
     return;
   }
 
+  if (await handleGraphQL(ctx)) return;
   if (await handleGit(ctx)) return;
 
   if (pathname === '/api/v3' || pathname.startsWith('/api/v3/')) {

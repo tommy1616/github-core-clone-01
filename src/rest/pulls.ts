@@ -11,8 +11,8 @@ import {
   type RequestContext,
 } from '../http.ts';
 import type { Pull, Repo, Store } from '../store.ts';
-import { buildCommit, buildTreeFromContents, putObject } from '../git/objects.ts';
-import { diffTrees, isMergeable, threeWayMerge, type FileDiff } from './diff.ts';
+import { diffTrees, isMergeable, type FileDiff } from './diff.ts';
+import { performMerge } from '../merge.ts';
 import { repoApiUrl, serializePull, type PullExtras } from './serialize.ts';
 import { repoOr404 } from './repos.ts';
 import type { RouteHandler } from './index.ts';
@@ -127,42 +127,11 @@ async function mergeHandler(ctx: RequestContext, owner: string, name: string, ra
   const repo = repoOr404(ctx, owner, name);
   const pull = pullOr404(repo, Number(rawNumber));
   await readJsonBody(ctx.req);
-  if (pull.merged || pull.state === 'closed') {
-    throw new HttpError(405, 'Pull Request is not mergeable', { documentation_url: `${ctx.origin}/api/v3/repos` });
+  const outcome = performMerge(ctx.store, repo, pull);
+  if (!outcome.ok) {
+    throw new HttpError(405, 'Pull Request is not mergeable', outcome.reason === 'conflict' ? { conflicts: outcome.conflicts ?? [] } : {});
   }
-  const headSha = ctx.store.resolveCommit(repo, pull.headRef);
-  const baseSha = ctx.store.resolveCommit(repo, pull.baseRef);
-  if (headSha === null || baseSha === null) {
-    throw new HttpError(405, 'Pull Request is not mergeable');
-  }
-  const mergeBase = ctx.store.mergeBase(repo, headSha, baseSha);
-  if (mergeBase === null) throw new HttpError(405, 'Pull Request is not mergeable');
-  const merged = threeWayMerge(ctx.store, repo, baseSha, headSha, mergeBase);
-  if (!merged.ok) {
-    throw new HttpError(405, 'Pull Request is not mergeable', { conflicts: merged.conflicts });
-  }
-  const tree = buildTreeFromContents(repo.objects, merged.files);
-  const viewer = ctx.store.viewer;
-  const commitSha = putObject(
-    repo.objects,
-    'commit',
-    buildCommit({
-      tree,
-      parents: [baseSha],
-      message: `${pull.title} (#${pull.number})`,
-      author: { name: viewer.name, email: viewer.email },
-    }),
-  );
-  repo.refs.set(`refs/heads/${pull.baseRef}`, commitSha);
-  const now = Date.now();
-  pull.merged = true;
-  pull.state = 'closed';
-  pull.mergedAt = now;
-  pull.mergeCommitSha = commitSha;
-  pull.updatedAt = now;
-  repo.updatedAt = now;
-  repo.pushedAt = now;
-  sendJson(ctx.res, 200, { sha: commitSha, merged: true, message: 'Pull Request successfully merged' });
+  sendJson(ctx.res, 200, { sha: outcome.sha, merged: true, message: 'Pull Request successfully merged' });
 }
 
 function pullCommits(ctx: RequestContext, owner: string, name: string, rawNumber: string): void {
