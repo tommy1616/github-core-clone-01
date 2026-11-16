@@ -59,8 +59,9 @@ export class PktLineDecoder {
 
   push(chunk: Uint8Array): void {
     if (chunk.length === 0) return;
-    const buffer = Buffer.from(chunk);
-    this.pending = this.offset === 0 ? buffer : Buffer.concat([this.pending.subarray(this.offset), buffer]);
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (this.offset === 0 && this.pending.length === 0) this.pending = buffer;
+    else this.pending = Buffer.concat([this.pending.subarray(this.offset), buffer]);
     this.offset = 0;
   }
 
@@ -85,7 +86,7 @@ export class PktLineDecoder {
     if (this.pending.length - this.offset < length) return null;
     const payload = this.pending.subarray(this.offset + 4, this.offset + length);
     const raw = this.pending.subarray(this.offset, this.offset + length);
-    const packet: GitPacket = { kind: 'data', payload: Buffer.from(payload), raw: Buffer.from(raw) };
+    const packet: GitPacket = { kind: 'data', payload, raw };
     this.offset += length;
     this.consumed += length;
     return packet;

@@ -2,6 +2,7 @@
 // resource modules; this file only knows their patterns and order.
 
 import { HttpError, sendJson, type RequestContext } from '../http.ts';
+import { authorizedRequest } from './auth.ts';
 import { registerContentRoutes } from './contents.ts';
 import { registerIssueRoutes } from './issues.ts';
 import { registerPullRoutes } from './pulls.ts';
@@ -26,20 +27,6 @@ registerContentRoutes(route);
 registerIssueRoutes(route);
 registerPullRoutes(route);
 
-function headerToken(value: string | undefined): string | null {
-  if (value === undefined) return null;
-  const match = /^(?:Bearer|token)\s+(.+)$/i.exec(value.trim());
-  return match === null ? null : (match[1] as string);
-}
-
-function authorized(ctx: RequestContext): boolean {
-  const presented = headerToken(ctx.req.headers.authorization);
-  if (presented === null) return false;
-  const expected = process.env.MAKEFUN_SHOP_TOKEN ?? '';
-  if (expected === '') return true;
-  return presented === expected;
-}
-
 function decodeParam(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -50,7 +37,7 @@ function decodeParam(value: string): string {
 
 /** Handle an /api/v3 request; answers false when no route matches so the caller can 404. */
 export async function handleRest(ctx: RequestContext): Promise<boolean> {
-  if (!authorized(ctx)) {
+  if (!authorizedRequest(ctx.req)) {
     sendJson(ctx.res, 401, { message: 'Bad credentials' });
     return true;
   }

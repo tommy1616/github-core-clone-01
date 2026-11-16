@@ -203,7 +203,7 @@ export interface PackReadResult {
 }
 
 /** Parse a packfile, resolving deltas against earlier entries, this pack or the supplied database. */
-export function readPack(pack: Buffer, existing?: ObjectDatabase): PackReadResult {
+export function readPack(pack: Buffer, existing?: ObjectDatabase, target?: ObjectDatabase): PackReadResult {
   if (pack.length < 32) throw new Error(`pack is ${pack.length} bytes, too short`);
   if (pack.subarray(0, 4).toString('ascii') !== 'PACK') throw new Error('pack does not start with PACK');
   const version = pack.readUInt32BE(4);
@@ -254,22 +254,37 @@ export function readPack(pack: Buffer, existing?: ObjectDatabase): PackReadResul
     data: Buffer;
     oid: string;
   }
+  const objects = new Map<string, GitObject>();
+  let pending = raw.filter((entry) => entry.typeCode === 6 || entry.typeCode === 7);
+  const deltaCount = pending.length;
+
+  if (pending.length === 0) {
+    for (const entry of raw) {
+      const type = CODE_TYPE[entry.typeCode] as GitObjectType;
+      const oid = hashObject(type, entry.data);
+      const object: GitObject = { type, content: entry.data };
+      objects.set(oid, object);
+      if (target !== undefined && !target.has(oid)) target.set(oid, object);
+    }
+    return { objects, declaredCount, deltaCount: 0, checksumOk };
+  }
+
   const resolvedByOffset = new Map<number, Resolved>();
   const resolvedByOid = new Map<string, Resolved>();
-  const objects = new Map<string, GitObject>();
 
   const record = (entry: RawEntry, type: GitObjectType, data: Buffer): Resolved => {
     const oid = hashObject(type, data);
     const resolved: Resolved = { type, data, oid };
     resolvedByOffset.set(entry.offset, resolved);
     if (!resolvedByOid.has(oid)) resolvedByOid.set(oid, resolved);
-    if (!objects.has(oid)) objects.set(oid, { type, content: data });
+    if (!objects.has(oid)) {
+      const object: GitObject = { type, content: data };
+      objects.set(oid, object);
+      if (target !== undefined && !target.has(oid)) target.set(oid, object);
+    }
     return resolved;
   };
 
-  let deltaCount = 0;
-  let pending = raw.filter((entry) => entry.typeCode === 6 || entry.typeCode === 7);
-  deltaCount = pending.length;
   for (const entry of raw) {
     if (entry.typeCode === 6 || entry.typeCode === 7) continue;
     record(entry, CODE_TYPE[entry.typeCode] as GitObjectType, entry.data);

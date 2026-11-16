@@ -1,23 +1,115 @@
 // Issues, labels and comments. A label must exist in the repository before an issue may carry
 // it; an unknown label is GitHub's 422, not a silent drop.
 
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   HttpError,
+  errorBody,
   queryInt,
   readJsonBody,
   sendJson,
+  sendJsonBuffer,
   stringField,
   type RequestContext,
 } from '../http.ts';
 import type { Issue, Repo, Store } from '../store.ts';
-import { serializeComment, serializeIssue, serializeLabel } from './serialize.ts';
+import { serializeComment, serializeIssue, serializeIssueJson, serializeLabel } from './serialize.ts';
 import { repoOr404 } from './repos.ts';
+import { authorizedRequest } from './auth.ts';
 import type { RouteHandler } from './index.ts';
 
 function issueOr404(repo: Repo, number: number): Issue {
   const issue = repo.issues.get(number);
   if (issue === undefined) throw new HttpError(404, 'Not Found');
   return issue;
+}
+
+/** The hot path for GET /repos/{o}/{r}/issues/{n}: bearer check, lookup, cached JSON buffer. */
+export function fastGetIssue(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: Store,
+  origin: string,
+  rawOwner: string,
+  rawRepo: string,
+  number: number,
+): void {
+  if (!authorizedRequest(req)) {
+    sendJson(res, 401, { message: 'Bad credentials' });
+    return;
+  }
+  let owner: string;
+  let repoName: string;
+  try {
+    owner = rawOwner.includes('%') ? decodeURIComponent(rawOwner) : rawOwner;
+    repoName = rawRepo.includes('%') ? decodeURIComponent(rawRepo) : rawRepo;
+  } catch {
+    sendJson(res, 404, { message: 'Not Found' });
+    return;
+  }
+  const repo = store.requireRepo(owner, repoName);
+  if (repo === undefined) {
+    sendJson(res, 404, { message: 'Not Found' });
+    return;
+  }
+  const issue = repo.issues.get(number);
+  if (issue === undefined) {
+    sendJson(res, 404, { message: 'Not Found' });
+    return;
+  }
+  sendJsonBuffer(res, 200, serializeIssueJson(origin, repo, issue).buffer);
+}
+
+function createIssueFromBody(store: Store, repo: Repo, body: Record<string, unknown>): Issue {
+  const title = stringField(body.title);
+  if (title === undefined || title.trim() === '') {
+    throw new HttpError(422, 'Validation Failed', {
+      errors: [{ resource: 'Issue', code: 'missing_field', field: 'title', message: 'title is required' }],
+    });
+  }
+  const text = body.body === null || body.body === undefined ? '' : stringField(body.body) ?? '';
+  const labels = validLabels(store, repo, labelNamesFrom(body));
+  return store.createIssue(repo, { title, body: text, labels });
+}
+
+/** The hot path for POST /repos/{o}/{r}/issues: no URL parse or route cascade, cached JSON reply. */
+export async function fastCreateIssue(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: Store,
+  origin: string,
+  rawOwner: string,
+  rawRepo: string,
+): Promise<void> {
+  try {
+    if (!authorizedRequest(req)) {
+      sendJson(res, 401, { message: 'Bad credentials' });
+      return;
+    }
+    let owner: string;
+    let repoName: string;
+    try {
+      owner = rawOwner.includes('%') ? decodeURIComponent(rawOwner) : rawOwner;
+      repoName = rawRepo.includes('%') ? decodeURIComponent(rawRepo) : rawRepo;
+    } catch {
+      sendJson(res, 404, { message: 'Not Found' });
+      return;
+    }
+    const repo = store.requireRepo(owner, repoName);
+    if (repo === undefined) {
+      sendJson(res, 404, { message: 'Not Found' });
+      return;
+    }
+    const body = await readJsonBody(req);
+    const issue = createIssueFromBody(store, repo, body);
+    sendJsonBuffer(res, 201, serializeIssueJson(origin, repo, issue).buffer);
+  } catch (err) {
+    if (err instanceof HttpError) {
+      sendJson(res, err.status, errorBody(err));
+      return;
+    }
+    sendJson(res, 500, { message: 'Internal Server Error' });
+  }
 }
 
 function labelNamesFrom(body: Record<string, unknown>): string[] {
@@ -66,15 +158,7 @@ async function issuesHandler(ctx: RequestContext, owner: string, name: string): 
   const repo = repoOr404(ctx, owner, name);
   if ((ctx.req.method ?? 'GET') === 'POST') {
     const body = await readJsonBody(ctx.req);
-    const title = stringField(body.title);
-    if (title === undefined || title.trim() === '') {
-      throw new HttpError(422, 'Validation Failed', {
-        errors: [{ resource: 'Issue', code: 'missing_field', field: 'title', message: 'title is required' }],
-      });
-    }
-    const text = body.body === null || body.body === undefined ? '' : stringField(body.body) ?? '';
-    const labels = validLabels(ctx.store, repo, labelNamesFrom(body));
-    const issue = ctx.store.createIssue(repo, { title, body: text, labels });
+    const issue = createIssueFromBody(ctx.store, repo, body);
     sendJson(ctx.res, 201, serializeIssue(ctx.origin, repo, issue));
     return;
   }
@@ -110,7 +194,8 @@ async function issueHandler(ctx: RequestContext, owner: string, name: string, ra
   const number = Number(rawNumber);
   const issue = issueOr404(repo, number);
   if ((ctx.req.method ?? 'GET') === 'GET') {
-    sendJson(ctx.res, 200, serializeIssue(ctx.origin, repo, issue));
+    const cached = serializeIssueJson(ctx.origin, repo, issue);
+    sendJsonBuffer(ctx.res, 200, cached.buffer);
     return;
   }
   const body = await readJsonBody(ctx.req);
@@ -138,6 +223,7 @@ async function issueHandler(ctx: RequestContext, owner: string, name: string, ra
     }
   }
   issue.updatedAt = Date.now();
+  issue.version += 1;
   repo.updatedAt = issue.updatedAt;
   sendJson(ctx.res, 200, serializeIssue(ctx.origin, repo, issue));
 }

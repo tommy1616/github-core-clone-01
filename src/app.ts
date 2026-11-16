@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { HttpError, errorBody, originOf, sendJson, type RequestContext } from './http.ts';
 import { Store } from './store.ts';
 import { handleRest } from './rest/index.ts';
+import { fastCreateIssue, fastGetIssue } from './rest/issues.ts';
 import { handleGit } from './git/smart-http.ts';
 import { handleGraphQL } from './graphql/index.ts';
 import { handleMcp } from './mcp/index.ts';
@@ -14,7 +15,7 @@ let requestCounter = 0;
 
 function requestId(): string {
   requestCounter += 1;
-  return `ghreq-${requestCounter.toString(16).padStart(8, '0')}`;
+  return `ghreq-${requestCounter.toString(36)}`;
 }
 
 async function handle(ctx: RequestContext): Promise<void> {
@@ -56,9 +57,31 @@ export function createApp(): Server {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const id = requestId();
     res.setHeader('x-github-request-id', id);
+    const rawUrl = req.url ?? '/';
+    const queryAt = rawUrl.indexOf('?');
+    const pathname = queryAt < 0 ? rawUrl : rawUrl.slice(0, queryAt);
+    if (queryAt < 0 && pathname.startsWith('/api/v3/repos/')) {
+      const method = req.method ?? 'GET';
+      if (method === 'GET' || method === 'POST') {
+        const parts = pathname.split('/');
+        if (parts.length === 8 && parts[3] === 'repos' && parts[6] === 'issues') {
+          const rawNumber = parts[7] ?? '';
+          if (method === 'GET' && /^[0-9]+$/.test(rawNumber)) {
+            const number = Number(rawNumber);
+            if (Number.isSafeInteger(number)) {
+              fastGetIssue(req, res, store, originOf(req), parts[4] ?? '', parts[5] ?? '', number);
+              return;
+            }
+          }
+        } else if (method === 'POST' && parts.length === 7 && parts[3] === 'repos' && parts[6] === 'issues') {
+          void fastCreateIssue(req, res, store, originOf(req), parts[4] ?? '', parts[5] ?? '');
+          return;
+        }
+      }
+    }
     let url: URL;
     try {
-      url = new URL(req.url ?? '/', 'http://entry');
+      url = new URL(rawUrl, 'http://entry');
     } catch {
       url = new URL('/', 'http://entry');
     }

@@ -823,6 +823,7 @@ function resolveMutation(fieldName: string, args: Record<string, unknown>, conte
         if (label.nodeId === id && !issue.labels.includes(label.name)) issue.labels.push(label.name);
       }
     }
+    if (labelIds.length > 0) issue.version += 1;
     return wrap('CreateIssuePayload', { _issue: wrapIssue(repo, issue), _clientMutationId: clientMutationId });
   }
 
@@ -850,6 +851,7 @@ function resolveMutation(fieldName: string, args: Record<string, unknown>, conte
       if (labels !== null) issue.labels = labels;
     }
     issue.updatedAt = Date.now();
+    issue.version += 1;
     repo.updatedAt = issue.updatedAt;
     const payloadName = fieldName === 'closeIssue' ? 'CloseIssuePayload' : fieldName === 'reopenIssue' ? 'ReopenIssuePayload' : 'UpdateIssuePayload';
     return wrap(payloadName, { _issue: wrapIssue(repo, issue), _clientMutationId: clientMutationId });

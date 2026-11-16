@@ -39,9 +39,6 @@ function sendBytes(res: ServerResponse, status: number, contentType: string, bod
   res.writeHead(status, {
     'content-type': contentType,
     'content-length': String(body.length),
-    'cache-control': 'no-cache, max-age=0, must-revalidate',
-    pragma: 'no-cache',
-    expires: 'Fri, 01 Jan 1980 00:00:00 GMT',
   });
   res.end(body);
 }
@@ -124,8 +121,12 @@ function v0RefAdvertisement(repo: Repo, capabilities: string): Buffer {
   return Buffer.concat(parts);
 }
 
-function uploadCapabilities(repo: Repo): string {
-  return [
+const CAPABILITY_CACHE = new WeakMap<Repo, { branch: string; upload: string; receive: string }>();
+
+function capabilitiesFor(repo: Repo): { upload: string; receive: string } {
+  const cached = CAPABILITY_CACHE.get(repo);
+  if (cached !== undefined && cached.branch === repo.defaultBranch) return cached;
+  const upload = [
     'multi_ack_detailed',
     'side-band-64k',
     'thin-pack',
@@ -137,10 +138,7 @@ function uploadCapabilities(repo: Repo): string {
     'object-format=sha1',
     `agent=${AGENT}`,
   ].join(' ');
-}
-
-function receiveCapabilities(repo: Repo): string {
-  return [
+  const receive = [
     'report-status',
     'side-band-64k',
     'delete-refs',
@@ -151,20 +149,53 @@ function receiveCapabilities(repo: Repo): string {
     'object-format=sha1',
     `agent=${AGENT}`,
   ].join(' ');
+  const entry = { branch: repo.defaultBranch, upload, receive };
+  CAPABILITY_CACHE.set(repo, entry);
+  return entry;
 }
 
-function v2Advertisement(): Buffer {
-  return Buffer.concat([
-    encodePktLine('# service=git-upload-pack\n'),
-    flushPacket(),
-    encodePktLine('version 2\n'),
-    encodePktLine(`agent=${AGENT}\n`),
-    encodePktLine('ls-refs=unborn\n'),
-    encodePktLine('fetch=shallow\n'),
-    encodePktLine('server-option\n'),
-    encodePktLine('object-format=sha1\n'),
-    flushPacket(),
-  ]);
+const V2_ADVERTISEMENT = Buffer.concat([
+  encodePktLine('# service=git-upload-pack\n'),
+  flushPacket(),
+  encodePktLine('version 2\n'),
+  encodePktLine(`agent=${AGENT}\n`),
+  encodePktLine('ls-refs=unborn\n'),
+  encodePktLine('fetch=shallow\n'),
+  encodePktLine('server-option\n'),
+  encodePktLine('object-format=sha1\n'),
+  flushPacket(),
+]);
+
+interface GitResponseCache {
+  readonly signature: string;
+  readonly lsRefs: Map<string, Buffer>;
+  readonly fetch: Map<string, Buffer>;
+}
+
+const RESPONSE_CACHE = new WeakMap<Repo, GitResponseCache>();
+
+/** A cheap signature of every ref and the default branch, the only inputs to an advertisement/pack. */
+function refsSignature(repo: Repo): string {
+  let signature = repo.defaultBranch;
+  for (const name of [...repo.refs.keys()].sort()) signature += `\n${name}=${repo.refs.get(name) ?? ''}`;
+  return signature;
+}
+
+function responseCache(repo: Repo): GitResponseCache {
+  const signature = refsSignature(repo);
+  const cached = RESPONSE_CACHE.get(repo);
+  if (cached !== undefined && cached.signature === signature) return cached;
+  const fresh: GitResponseCache = { signature, lsRefs: new Map<string, Buffer>(), fetch: new Map<string, Buffer>() };
+  RESPONSE_CACHE.set(repo, fresh);
+  return fresh;
+}
+
+function cachePut(map: Map<string, Buffer>, key: string, value: Buffer): void {
+  map.set(key, value);
+  if (map.size > 32) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
 }
 
 function infoRefs(ctx: RequestContext, repo: Repo, service: string): void {
@@ -172,13 +203,13 @@ function infoRefs(ctx: RequestContext, repo: Repo, service: string): void {
     const protocol = ctx.req.headers['git-protocol'];
     const wantsV2 = typeof protocol === 'string' && /(?:^|[\s,])version=2(?:$|[\s,])/.test(protocol);
     if (wantsV2) {
-      sendBytes(ctx.res, 200, UPLOAD_ADVERTISEMENT, v2Advertisement());
+      sendBytes(ctx.res, 200, UPLOAD_ADVERTISEMENT, V2_ADVERTISEMENT);
       return;
     }
     const body = Buffer.concat([
       encodePktLine('# service=git-upload-pack\n'),
       flushPacket(),
-      v0RefAdvertisement(repo, uploadCapabilities(repo)),
+      v0RefAdvertisement(repo, capabilitiesFor(repo).upload),
     ]);
     sendBytes(ctx.res, 200, UPLOAD_ADVERTISEMENT, body);
     return;
@@ -187,7 +218,7 @@ function infoRefs(ctx: RequestContext, repo: Repo, service: string): void {
     const body = Buffer.concat([
       encodePktLine('# service=git-receive-pack\n'),
       flushPacket(),
-      v0RefAdvertisement(repo, receiveCapabilities(repo)),
+      v0RefAdvertisement(repo, capabilitiesFor(repo).receive),
     ]);
     sendBytes(ctx.res, 200, RECEIVE_ADVERTISEMENT, body);
     return;
@@ -447,8 +478,21 @@ function planPack(repo: Repo, request: FetchRequest): { pack: Buffer; shallow: s
   return { pack: writePack(send), shallow: plan.shallow, unshallow: plan.unshallow };
 }
 
+function fetchCacheKey(request: FetchRequest): string {
+  return [
+    request.wants.slice().sort().join(','),
+    request.haves.slice().sort().join(','),
+    request.shallow.slice().sort().join(','),
+    request.depth === null ? '' : String(request.depth),
+  ].join('\u0000');
+}
+
 function v2Fetch(repo: Repo, packets: readonly GitPacket[]): Buffer {
   const request = parseFetch(requestLines(packets));
+  const cache = responseCache(repo);
+  const key = fetchCacheKey(request);
+  const hit = cache.fetch.get(key);
+  if (hit !== undefined) return hit;
   const { pack, shallow, unshallow } = planPack(repo, request);
   const parts: Buffer[] = [];
   parts.push(encodePktLine('acknowledgments\n'));
@@ -468,7 +512,9 @@ function v2Fetch(repo: Repo, packets: readonly GitPacket[]): Buffer {
   parts.push(encodePktLine('packfile\n'));
   parts.push(...sidebandPack(pack));
   parts.push(flushPacket());
-  return Buffer.concat(parts);
+  const response = Buffer.concat(parts);
+  cachePut(cache.fetch, key, response);
+  return response;
 }
 
 function parseV0Fetch(packets: readonly GitPacket[]): FetchRequest {
@@ -514,8 +560,10 @@ function v0Fetch(repo: Repo, packets: readonly GitPacket[]): Buffer {
 
 function isAncestor(repo: Repo, ancestor: string, descendant: string): boolean {
   if (ancestor === descendant) return true;
-  const seen = new Set<string>();
-  const stack = [descendant];
+  const parents = commitParentsOf(repo.objects, descendant);
+  if (parents.includes(ancestor)) return true;
+  const seen = new Set<string>([descendant]);
+  const stack = [...parents];
   while (stack.length > 0) {
     const sha = stack.pop() as string;
     if (seen.has(sha)) continue;
@@ -564,10 +612,7 @@ function receivePack(repo: Repo, body: Buffer): Buffer {
   let unpackError: string | null = null;
   if (rest.length > 0) {
     try {
-      const parsed = readPack(rest, repo.objects);
-      for (const [sha, object] of parsed.objects) {
-        if (!repo.objects.has(sha)) repo.objects.set(sha, object);
-      }
+      readPack(rest, repo.objects, repo.objects);
     } catch (err) {
       unpackError = err instanceof Error ? err.message : String(err);
     }
@@ -640,7 +685,15 @@ function uploadPack(repo: Repo, body: Buffer): Buffer {
   const { packets } = parsePktLines(body);
   const lines = requestLines(packets);
   const command = lines.find((line) => line.startsWith('command='));
-  if (command === 'command=ls-refs') return lsRefs(repo, packets);
+  if (command === 'command=ls-refs') {
+    const cache = responseCache(repo);
+    const key = body.toString('base64');
+    const hit = cache.lsRefs.get(key);
+    if (hit !== undefined) return hit;
+    const response = lsRefs(repo, packets);
+    cachePut(cache.lsRefs, key, response);
+    return response;
+  }
   if (command === 'command=fetch') return v2Fetch(repo, packets);
   return v0Fetch(repo, packets);
 }

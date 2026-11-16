@@ -320,6 +320,7 @@ export function callTool(ctx: RequestContext, name: string, args: Record<string,
           issue.closedAt = state === 'closed' ? Date.now() : null;
         }
         issue.updatedAt = Date.now();
+        issue.version += 1;
         repo.updatedAt = issue.updatedAt;
         return textResult(serializeIssue(ctx.origin, repo, issue));
       }

@@ -39,6 +39,16 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
   res.end(text);
 }
 
+export function sendJsonBuffer(res: ServerResponse, status: number, body: Buffer, headers: Readonly<Record<string, string>> = {}): void {
+  if (res.writableEnded) return;
+  res.writeHead(status, {
+    'content-type': JSON_TYPE,
+    'content-length': String(body.length),
+    ...headers,
+  });
+  res.end(body);
+}
+
 export function sendEmpty(res: ServerResponse, status: number, headers: Readonly<Record<string, string>> = {}): void {
   if (res.writableEnded) return;
   res.writeHead(status, headers);

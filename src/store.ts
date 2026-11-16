@@ -51,6 +51,7 @@ export interface Issue {
   updatedAt: number;
   closedAt: number | null;
   readonly comments: Comment[];
+  version: number;
 }
 
 export interface Pull {
@@ -264,6 +265,7 @@ export class Store {
       updatedAt: now,
       closedAt: null,
       comments: [],
+      version: 0,
     };
     repo.issues.set(issue.number, issue);
     repo.updatedAt = now;
@@ -284,6 +286,7 @@ export class Store {
     };
     issue.comments.push(comment);
     issue.updatedAt = now;
+    issue.version += 1;
     repo.updatedAt = now;
     return comment;
   }

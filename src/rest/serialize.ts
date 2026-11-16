@@ -15,29 +15,36 @@ export function repoApiUrl(origin: string, repo: Repo): string {
   return `${origin}/api/v3/repos/${encodeURIComponent(repo.owner.login)}/${encodeURIComponent(repo.name)}`;
 }
 
+const USER_JSON = new WeakMap<User, { readonly origin: string; readonly value: Record<string, unknown> }>();
+
 export function serializeUser(origin: string, user: User): Record<string, unknown> {
-  return {
+  const cached = USER_JSON.get(user);
+  if (cached !== undefined && cached.origin === origin) return cached.value;
+  const login = encodeURIComponent(user.login);
+  const value: Record<string, unknown> = {
     login: user.login,
     id: user.id,
     node_id: user.nodeId,
     avatar_url: `${origin}/avatars/u/${user.id}`,
     gravatar_id: '',
-    url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}`,
-    html_url: `${origin}/${encodeURIComponent(user.login)}`,
-    followers_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/followers`,
-    following_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/following{/other_user}`,
-    gists_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/gists{/gist_id}`,
-    starred_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/starred{/owner}{/repo}`,
-    subscriptions_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/subscriptions`,
-    organizations_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/orgs`,
-    repos_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/repos`,
-    events_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/events{/privacy}`,
-    received_events_url: `${origin}/api/v3/users/${encodeURIComponent(user.login)}/received_events`,
+    url: `${origin}/api/v3/users/${login}`,
+    html_url: `${origin}/${login}`,
+    followers_url: `${origin}/api/v3/users/${login}/followers`,
+    following_url: `${origin}/api/v3/users/${login}/following{/other_user}`,
+    gists_url: `${origin}/api/v3/users/${login}/gists{/gist_id}`,
+    starred_url: `${origin}/api/v3/users/${login}/starred{/owner}{/repo}`,
+    subscriptions_url: `${origin}/api/v3/users/${login}/subscriptions`,
+    organizations_url: `${origin}/api/v3/users/${login}/orgs`,
+    repos_url: `${origin}/api/v3/users/${login}/repos`,
+    events_url: `${origin}/api/v3/users/${login}/events{/privacy}`,
+    received_events_url: `${origin}/api/v3/users/${login}/received_events`,
     type: 'User',
     site_admin: false,
     name: user.name,
     email: user.email,
   };
+  USER_JSON.set(user, { origin, value });
+  return value;
 }
 
 export function serializeRepo(origin: string, repo: Repo): Record<string, unknown> {
@@ -158,6 +165,60 @@ export function serializeLabel(origin: string, repo: Repo, label: Label): Record
     default: label.default,
     description: label.description,
   };
+}
+
+interface IssueJsonCacheEntry {
+  readonly version: number;
+  readonly origin: string;
+  readonly repoName: string;
+  readonly owner: string;
+  readonly comments: number;
+  readonly updatedAt: number;
+  readonly labels: string;
+  readonly text: string;
+  readonly buffer: Buffer;
+}
+
+const ISSUE_JSON_CACHE = new WeakMap<Issue, IssueJsonCacheEntry>();
+
+/** The issue's JSON text and buffer, reused until the issue, its labels or its repository change. */
+export function serializeIssueJson(origin: string, repo: Repo, issue: Issue): { readonly text: string; readonly buffer: Buffer } {
+  const labels =
+    issue.labels.length === 0
+      ? ''
+      : issue.labels
+          .map((name) => {
+            const label = repo.labels.get(name.toLowerCase());
+            return label === undefined ? `?${name}` : `${label.id}:${label.name}:${label.color}:${label.description}`;
+          })
+          .join('\u0001');
+  const cached = ISSUE_JSON_CACHE.get(issue);
+  if (
+    cached !== undefined &&
+    cached.version === issue.version &&
+    cached.origin === origin &&
+    cached.repoName === repo.name &&
+    cached.owner === repo.owner.login &&
+    cached.comments === issue.comments.length &&
+    cached.updatedAt === issue.updatedAt &&
+    cached.labels === labels
+  ) {
+    return cached;
+  }
+  const text = JSON.stringify(serializeIssue(origin, repo, issue));
+  const entry: IssueJsonCacheEntry = {
+    version: issue.version,
+    origin,
+    repoName: repo.name,
+    owner: repo.owner.login,
+    comments: issue.comments.length,
+    updatedAt: issue.updatedAt,
+    labels,
+    text,
+    buffer: Buffer.from(text, 'utf8'),
+  };
+  ISSUE_JSON_CACHE.set(issue, entry);
+  return entry;
 }
 
 export function serializeIssue(origin: string, repo: Repo, issue: Issue): Record<string, unknown> {

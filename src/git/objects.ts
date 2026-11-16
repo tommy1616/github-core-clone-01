@@ -266,23 +266,36 @@ export function readTreeIndex(objects: ObjectDatabase, treeSha: string, prefix =
   return out;
 }
 
+const TREE_CACHE = new WeakMap<GitObject, string | null>();
+const PARENTS_CACHE = new WeakMap<GitObject, readonly string[]>();
+
 /** A commit's tree id, or null when the object is absent or not a commit. */
 export function commitTreeOf(objects: ObjectDatabase, commitSha: string): string | null {
   const object = objects.get(commitSha);
   if (object === undefined || object.type !== 'commit') return null;
+  const cached = TREE_CACHE.get(object);
+  if (cached !== undefined) return cached;
+  let tree: string | null = null;
   try {
-    return parseCommit(object.content).tree;
+    tree = parseCommit(object.content).tree;
   } catch {
-    return null;
+    tree = null;
   }
+  TREE_CACHE.set(object, tree);
+  return tree;
 }
 
 export function commitParentsOf(objects: ObjectDatabase, commitSha: string): string[] {
   const object = objects.get(commitSha);
   if (object === undefined || object.type !== 'commit') return [];
+  const cached = PARENTS_CACHE.get(object);
+  if (cached !== undefined) return cached as string[];
+  let parents: string[] = [];
   try {
-    return parseCommit(object.content).parents;
+    parents = parseCommit(object.content).parents;
   } catch {
-    return [];
+    parents = [];
   }
+  PARENTS_CACHE.set(object, parents);
+  return parents;
 }
