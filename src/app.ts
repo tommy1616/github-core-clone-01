@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { HttpError, errorBody, originOf, sendJson, type RequestContext } from './http.ts';
 import { Store } from './store.ts';
 import { handleRest } from './rest/index.ts';
+import { handleGit } from './git/smart-http.ts';
 
 let requestCounter = 0;
 
@@ -23,6 +24,8 @@ async function handle(ctx: RequestContext): Promise<void> {
     sendJson(res, 200, { ok: true });
     return;
   }
+
+  if (await handleGit(ctx)) return;
 
   if (pathname === '/api/v3' || pathname.startsWith('/api/v3/')) {
     if (await handleRest(ctx)) return;
