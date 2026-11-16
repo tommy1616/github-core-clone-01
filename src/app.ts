@@ -8,6 +8,7 @@ import { Store } from './store.ts';
 import { handleRest } from './rest/index.ts';
 import { handleGit } from './git/smart-http.ts';
 import { handleGraphQL } from './graphql/index.ts';
+import { handleMcp } from './mcp/index.ts';
 
 let requestCounter = 0;
 
@@ -26,6 +27,7 @@ async function handle(ctx: RequestContext): Promise<void> {
     return;
   }
 
+  if (await handleMcp(ctx)) return;
   if (await handleGraphQL(ctx)) return;
   if (await handleGit(ctx)) return;
 

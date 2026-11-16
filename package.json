@@ -1,9 +1,9 @@
 {
-  "name": "github-core-clone-01-starter",
-  "version": "0.0.0",
+  "name": "github-core-clone-01",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A minimal GitHub-compatible forge: the lifecycle and two answers, ready to grow into the contest's surface",
+  "description": "A standalone GitHub-compatible git forge on Node's standard library: git smart HTTP, REST v3, GraphQL v4 and MCP from one in-memory store",
   "license": "MIT",
   "engines": {
     "node": ">=22.18"
